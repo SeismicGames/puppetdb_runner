@@ -1,18 +1,23 @@
 package com.seismicgames;
 
-import org.apache.http.StatusLine;
-import org.apache.http.client.HttpClient;
-import org.apache.http.client.ResponseHandler;
-import org.apache.http.client.methods.HttpGet;
-import org.apache.http.conn.scheme.Scheme;
-import org.apache.http.impl.client.DefaultHttpClient;
-import org.apache.http.params.BasicHttpParams;
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.reflect.TypeToken;
+import com.seismicgames.gson.ZonedDTConverter;
+import com.seismicgames.pojo.*;
+import org.glassfish.jersey.client.ClientConfig;
 
-import java.io.IOException;
+import javax.ws.rs.NotSupportedException;
+import javax.ws.rs.client.Client;
+import javax.ws.rs.client.ClientBuilder;
+import javax.ws.rs.client.Entity;
+import javax.ws.rs.core.MediaType;
+import javax.ws.rs.HttpMethod;
 import java.io.PrintStream;
-import java.net.URI;
-import java.security.*;
-import java.security.cert.CertificateException;
+import java.net.URISyntaxException;
+import java.net.URL;
+import java.time.ZonedDateTime;
+import java.util.*;
 
 public class PuppetDBClient {
     public enum Endpoint {
@@ -27,55 +32,103 @@ public class PuppetDBClient {
         }
     }
 
-    private final String host;
-    private final int port;
-    private final SSLHelper sslHelper;
+    private final Client CLIENT = ClientBuilder.newClient(new ClientConfig());
+    private final Gson GSON;
+
+    private final URL url;
+    private final String query;
     private final PrintStream logger;
 
-    public PuppetDBClient(String host, int port, SSLHelper sslHelper, PrintStream logger) {
-        this.host = host;
-        this.port = port;
-        this.sslHelper = sslHelper;
+    public PuppetDBClient(URL url, String query, PrintStream logger) {
+        this.url = url;
+        this.query = query;
         this.logger = logger;
+
+        GSON = new GsonBuilder()
+                .registerTypeAdapter(ZonedDateTime.class, new ZonedDTConverter())
+                .create();
     }
 
-    public void runQuery(String endpoint) {
+    public Collection<HostInfo> run(Endpoint endpoint)
+    {
+        switch (endpoint) {
+            case node:
+                Map<String, HostInfo> instances = new HashMap<>();
+
+                // first get list of impacted nodes
+                String q = new Gson().toJson(new Query(query));
+                List<Node> nodes = runQuery(HttpMethod.POST,"/pdb/query/v4/nodes", q,
+                        new TypeToken<List<Node>>(){});
+
+                String nodePath = "/pdb/query/v4/nodes/%s/facts/ipaddress";
+                List<Fact> facts = new ArrayList<>();
+                for (Node node : nodes) {
+                    facts.addAll(runQuery(HttpMethod.GET, String.format(nodePath, node.certname), null,
+                            new TypeToken<List<Fact>>(){}));
+                }
+
+                for (Fact fact : facts) {
+                    if(fact.name.equals("ipaddress")) {
+                        HostInfo hostInfo = new HostInfo();
+                        hostInfo.certname = fact.certname;
+                        hostInfo.host = fact.value;
+
+                        instances.put(fact.certname, hostInfo);
+                    }
+                }
+
+                nodePath = "/pdb/query/v4/nodes/%s/facts/ssh";
+                List<SSHFact> sshFacts;
+                for (Node node : nodes) {
+                    sshFacts = runQuery(HttpMethod.GET, String.format(nodePath, node.certname), null,
+                            new TypeToken<List<SSHFact>>(){});
+
+                    if(sshFacts.size() != 1) {
+                        logger.println("SSH facts not found from Puppet!");
+                        throw new RuntimeException();
+                    }
+
+                    if(!instances.containsKey(node.certname)) {
+                        logger.println(String.format("Couldn't find node %s to add ssh data to", node.certname));
+                        throw new RuntimeException();
+                    }
+
+                    instances.get(node.certname).rsaKey = sshFacts.get(0).value.rsa.key;
+                }
+
+                return instances.values();
+            default:
+                // TODO: support other queries
+                throw new RuntimeException(String.format("Endpoint %s is not currently accepted", endpoint));
+        }
+    }
+
+    private <T extends PuppetDBResult> List<T> runQuery(String method, String path, String query, TypeToken<List<T>> token) {
         try {
-            String path = getEndpoint(Endpoint.fromString(endpoint));
-            HttpClient client = getHttpClient();
+            logger.println(String.format("Connecting to %s%s", url, path));
 
-            logger.println(String.format("Connecting to https://%s:%s%s", host, port, path));
-            URI uri = new URI("https", null, host, port, path, null, null);
-
-            HttpGet get = new HttpGet(uri);
-            client.execute(get, (ResponseHandler<Void>) response -> {
-                StatusLine line = response.getStatusLine();
-                int code = line.getStatusCode();
-                logger.println("Response code: " + code);
-
-                return null;
-            });
-        } catch (Exception e) {
+            String entity;
+            switch (method) {
+                case HttpMethod.POST:
+                    entity = CLIENT.target(url.toURI())
+                            .path(path)
+                            .request(MediaType.APPLICATION_JSON)
+                            .post(Entity.entity(query, MediaType.APPLICATION_JSON_TYPE), String.class);
+                    break;
+                case HttpMethod.GET:
+                    entity = CLIENT.target(url.toURI())
+                            .path(path)
+                            .request(MediaType.APPLICATION_JSON)
+                            .get(String.class);
+                    break;
+                default:
+                    throw new RuntimeException("Unsupported HTTP method: " + method);
+            }
+            return GSON.fromJson(entity, token.getType());
+        } catch (URISyntaxException e) {
             logger.println(String.format("runQuery exception! %s", e.getMessage()));
             e.printStackTrace();
             throw new RuntimeException();
         }
-    }
-
-    private String getEndpoint(Endpoint endpoint) {
-        switch (endpoint) {
-            case node:
-                return "/pdb/query/v4/nodes";
-        }
-
-        throw new IllegalArgumentException("Invalid Endpoint sent to getEndpoint");
-    }
-
-    // get the http client with ssl handler
-    private HttpClient getHttpClient() throws CertificateException, UnrecoverableKeyException, NoSuchAlgorithmException,
-            KeyStoreException, KeyManagementException, IOException {
-        DefaultHttpClient client = new DefaultHttpClient(new BasicHttpParams());
-        client.getConnectionManager().getSchemeRegistry().register(new Scheme("https", 443, sslHelper.getSSLFactory()));
-        return client;
     }
 }

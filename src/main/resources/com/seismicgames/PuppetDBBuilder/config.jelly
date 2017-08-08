@@ -1,5 +1,5 @@
 <?jelly escape-by-default='true'?>
-<j:jelly xmlns:j="jelly:core" xmlns:st="jelly:stapler" xmlns:d="jelly:define" xmlns:l="/lib/layout" xmlns:t="/lib/hudson" xmlns:f="/lib/form">
+<j:jelly xmlns:j="jelly:core" xmlns:c="/lib/credentials" xmlns:f="/lib/form">
     <f:entry title="Host" field="host">
         <f:textbox />
     </f:entry>
@@ -9,19 +9,8 @@
     <f:entry title="PuppetDB Query" field="query">
         <f:textarea />
     </f:entry>
-    <f:entry title="CA Certificate" field="cacert">
-        <f:textarea />
+    <f:entry field="credentialsId" title="${%Credentials}">
+        <c:select />
     </f:entry>
-    <f:entry title="Host Certificate" field="cert">
-        <f:textarea />
-    </f:entry>
-    <f:entry title="Private Key" field="privateKey">
-        <f:textarea />
-    </f:entry>
-    <f:entry title="SSH Username" field="username">
-        <f:textbox />
-    </f:entry>
-    <f:entry title="SSH Password" field="password">
-        <f:textbox />
-    </f:entry>
+
 </j:jelly>
